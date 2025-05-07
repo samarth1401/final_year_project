@@ -26,15 +26,6 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# ✅ Hide Deploy button
-st.markdown("""
-    <style>
-    button[title="Deploy this app"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
 st.title("🚨 Helmet Violation & Number Plate Detection System using OCR")
 
@@ -130,11 +121,15 @@ def detect_and_display(frame, timestamp=None):
 
     return frame, detected_numbers
 
-# ✅ Send SMS
-def send_sms(to_phone, plate):
+# ✅ Send SMS with fine info
+def send_sms(to_phone, plate, fine_amount, previous_fine, total_due):
     try:
         message = twilio_client.messages.create(
-            body=f"Traffic Violation Detected: No helmet. Plate: {plate}",
+            body=(
+                f"Traffic Violation (No Helmet)\n"
+                f"Plate: {plate}\n"
+                f"Fine: ₹{fine_amount}, Prev: ₹{previous_fine}, Total: ₹{total_due}"
+            ),
             from_=TWILIO_FROM,
             to=to_phone
         )
@@ -157,7 +152,7 @@ def create_challan(plate):
         "user": user_id,
         "violation_datetime": {"$gte": start_of_day, "$lte": end_of_day}
     })
-    if count_today >= 99:
+    if count_today >= 222:
         st.warning(f"⚠️ Max 5 challans already issued today for {plate}")
         return
 
@@ -190,7 +185,13 @@ def create_challan(plate):
         "phone_no": user.get("phone_no", "N/A")
     }
 
-    send_sms(user["phone_no"], plate)
+    # send_sms(
+    #     user["phone_no"],
+    #     plate,
+    #     challan_doc["fine_amount"],
+    #     challan_doc["previous_fine_amount"],
+    #     challan_doc["total_fine_due"]
+    # )
 
     st.success(f"✅ Challan created for {plate}")
     st.markdown(f"""
