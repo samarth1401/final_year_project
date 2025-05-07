@@ -13,11 +13,12 @@ import difflib
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
+from twilio.rest import Client
 
 # ✅ Load environment variables
 load_dotenv()
 
-# ✅ Set Streamlit page config
+# ✅ Streamlit page config
 st.set_page_config(
     page_title="Helmet & Number Plate Detection",
     page_icon="🚦",
@@ -25,7 +26,7 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# ✅ Hide "Deploy" button
+# ✅ Hide Deploy button
 st.markdown("""
     <style>
     button[title="Deploy this app"] {
@@ -37,30 +38,34 @@ st.markdown("""
 
 st.title("🚨 Helmet Violation & Number Plate Detection System using OCR")
 
-# ✅ Fix asyncio loop for Windows
+# ✅ Windows asyncio fix
 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# ✅ Load YOLO model
+# ✅ Load models
 model = YOLO("runs/detect/train7/weights/best.pt")
-
-# ✅ Load EasyOCR
 reader = easyocr.Reader(['en'], gpu=False)
 
-# ✅ OCR result file
+# ✅ Result file
 os.makedirs("detected_numbers", exist_ok=True)
 save_file = os.path.join("detected_numbers", "ocr_results.txt")
 if not os.path.exists(save_file):
     with open(save_file, "w") as f:
         f.write("Timestamp\tPlate Number\n")
 
-# ✅ MongoDB setup
+# ✅ MongoDB
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 db = client["database"]
 users_collection = db["user_details"]
 challans_collection = db["challans"]
 
-# ✅ Accuracy info
+# ✅ Twilio
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
+TWILIO_FROM = os.getenv("TWILIO_FROM_PHONE")
+twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
+
+# ✅ Accuracy display
 def get_accuracy_info():
     try:
         df = pd.read_csv("runs/detect/train7/results.csv")
@@ -75,7 +80,7 @@ if map50:
     st.write(f"**mAP@0.5:** {map50:.2f}")
     st.write(f"**mAP@0.5:0.95:** {map5095:.2f}")
 
-# ✅ Detection + OCR logic
+# ✅ OCR + Detection
 def detect_and_display(frame, timestamp=None):
     if frame.shape[2] == 4:
         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
@@ -108,7 +113,6 @@ def detect_and_display(frame, timestamp=None):
                 gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                 gray = cv2.GaussianBlur(gray, (5, 5), 0)
                 dilated = cv2.dilate(gray, np.ones((2, 2), np.uint8), iterations=1)
-
                 ocr_result = reader.readtext(dilated, allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", rotation_info=[0])
 
                 combined_plate = ""
@@ -126,7 +130,19 @@ def detect_and_display(frame, timestamp=None):
 
     return frame, detected_numbers
 
-# ✅ Challan creation logic
+# ✅ Send SMS
+def send_sms(to_phone, plate):
+    try:
+        message = twilio_client.messages.create(
+            body=f"Traffic Violation Detected: No helmet. Plate: {plate}",
+            from_=TWILIO_FROM,
+            to=to_phone
+        )
+        print(f"SMS sent to {to_phone}: SID {message.sid}")
+    except Exception as e:
+        print(f"SMS error: {e}")
+
+# ✅ Challan creation
 def create_challan(plate):
     user = users_collection.find_one({"vehicle_no": plate})
     if not user:
@@ -134,15 +150,14 @@ def create_challan(plate):
         return
 
     user_id = user["_id"]
-
     start_of_day = datetime.datetime.combine(datetime.datetime.today(), datetime.time.min)
     end_of_day = datetime.datetime.combine(datetime.datetime.today(), datetime.time.max)
+
     count_today = challans_collection.count_documents({
         "user": user_id,
         "violation_datetime": {"$gte": start_of_day, "$lte": end_of_day}
     })
-
-    if count_today >= 5:
+    if count_today >= 99:
         st.warning(f"⚠️ Max 5 challans already issued today for {plate}")
         return
 
@@ -171,13 +186,29 @@ def create_challan(plate):
     created_challan = challans_collection.find_one({"_id": inserted.inserted_id})
     created_challan["user_detail"] = {
         "name": user.get("name", "N/A"),
-        "vehicle_no": user.get("vehicle_no")
+        "vehicle_no": user.get("vehicle_no"),
+        "phone_no": user.get("phone_no", "N/A")
     }
 
-    st.info(f"✅ Challan created for {plate}")
-    st.json(created_challan)
+    send_sms(user["phone_no"], plate)
 
-# ✅ UI input option
+    st.success(f"✅ Challan created for {plate}")
+    st.markdown(f"""
+    ### 🚨 Challan Summary
+
+    - **Name:** {created_challan['user_detail']['name']}
+    - **Phone Number:** {created_challan['user_detail']['phone_no']}
+    - **Vehicle Number:** {created_challan['vehicle_no']}
+    - **Fine Amount:** ₹{created_challan['fine_amount']}
+    - **Previous Dues:** ₹{created_challan['previous_fine_amount']}
+    - **Total Fine Due:** ₹{created_challan['total_fine_due']}
+    - **Violation:** {created_challan['violation_type']}
+    - **Date & Time:** {created_challan['violation_datetime'].strftime('%Y-%m-%d %H:%M:%S')}
+    - **Location:** {created_challan['location']['address']}
+    - **Status:** {created_challan['challan_status']}
+    """)
+
+# ✅ Streamlit UI
 option = st.radio("Choose input type:", ("Image", "Video"))
 
 if option == "Image":
@@ -222,7 +253,7 @@ else:
         cap.release()
 
         if plate_log:
-            for t, num in plate_log[:1]:  # Just take first for challan creation
+            for t, num in plate_log[:1]:
                 st.write(f"First Detected Plate: {num}")
                 create_challan(num)
 
