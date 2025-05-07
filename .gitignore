@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Python egg info
+*.egg-info/
+*.egg
+
+# Environment variable files
+.env
+
+# Streamlit and local logs
+.streamlit/
+logs/
+
+# VSCode settings
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Model weights and result folders
+runs/
+detected_numbers/ocr_results.txt
