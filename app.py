@@ -9,8 +9,15 @@ from PIL import Image
 import datetime
 import os
 import asyncio
+import difflib
+from pymongo import MongoClient
+from bson.objectid import ObjectId
+from dotenv import load_dotenv
 
-# ✅ Must be first Streamlit command
+# ✅ Load environment variables
+load_dotenv()
+
+# ✅ Set Streamlit page config
 st.set_page_config(
     page_title="Helmet & Number Plate Detection",
     page_icon="🚦",
@@ -18,7 +25,7 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# ✅ Hide only the Deploy button, keep menu (three dots)
+# ✅ Hide "Deploy" button
 st.markdown("""
     <style>
     button[title="Deploy this app"] {
@@ -28,26 +35,32 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Fix for asyncio event loop (Windows only)
+st.title("🚨 Helmet Violation & Number Plate Detection System using OCR")
+
+# ✅ Fix asyncio loop for Windows
 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# Load YOLO model
+# ✅ Load YOLO model
 model = YOLO("runs/detect/train7/weights/best.pt")
 
-# Load EasyOCR
+# ✅ Load EasyOCR
 reader = easyocr.Reader(['en'], gpu=False)
 
-# Save path for OCR results
-save_file = "detected_numbers/ocr_results.txt"
-os.makedirs(os.path.dirname(save_file), exist_ok=True)
+# ✅ OCR result file
+os.makedirs("detected_numbers", exist_ok=True)
+save_file = os.path.join("detected_numbers", "ocr_results.txt")
 if not os.path.exists(save_file):
     with open(save_file, "w") as f:
         f.write("Timestamp\tPlate Number\n")
 
-# UI Input Type
-option = st.radio("Choose input type:", ("Image", "Video"))
+# ✅ MongoDB setup
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db = client["database"]
+users_collection = db["user_details"]
+challans_collection = db["challans"]
 
-# Model Accuracy
+# ✅ Accuracy info
 def get_accuracy_info():
     try:
         df = pd.read_csv("runs/detect/train7/results.csv")
@@ -62,7 +75,7 @@ if map50:
     st.write(f"**mAP@0.5:** {map50:.2f}")
     st.write(f"**mAP@0.5:0.95:** {map5095:.2f}")
 
-# Detection + OCR
+# ✅ Detection + OCR logic
 def detect_and_display(frame, timestamp=None):
     if frame.shape[2] == 4:
         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
@@ -77,7 +90,6 @@ def detect_and_display(frame, timestamp=None):
             conf = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            # Expand bounding box
             margin = 15
             h, w, _ = frame.shape
             x1 = max(0, x1 - margin)
@@ -85,7 +97,6 @@ def detect_and_display(frame, timestamp=None):
             x2 = min(w, x2 + margin)
             y2 = min(h, y2 + margin)
 
-            # Draw box
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
             cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
@@ -99,12 +110,10 @@ def detect_and_display(frame, timestamp=None):
                 dilated = cv2.dilate(gray, np.ones((2, 2), np.uint8), iterations=1)
 
                 ocr_result = reader.readtext(dilated, allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", rotation_info=[0])
-                print("Raw OCR:", ocr_result)
 
                 combined_plate = ""
                 for (_, text, prob) in ocr_result:
                     text = text.strip().upper().replace(" ", "")
-                    print(f"Detected OCR Text: {text} with Confidence: {prob:.2f}")
                     if prob > 0.10 and len(text) >= 1:
                         combined_plate += text
 
@@ -117,20 +126,74 @@ def detect_and_display(frame, timestamp=None):
 
     return frame, detected_numbers
 
-# Handle image input
+# ✅ Challan creation logic
+def create_challan(plate):
+    user = users_collection.find_one({"vehicle_no": plate})
+    if not user:
+        st.warning(f"⚠️ No user found for vehicle number: {plate}")
+        return
+
+    user_id = user["_id"]
+
+    start_of_day = datetime.datetime.combine(datetime.datetime.today(), datetime.time.min)
+    end_of_day = datetime.datetime.combine(datetime.datetime.today(), datetime.time.max)
+    count_today = challans_collection.count_documents({
+        "user": user_id,
+        "violation_datetime": {"$gte": start_of_day, "$lte": end_of_day}
+    })
+
+    if count_today >= 5:
+        st.warning(f"⚠️ Max 5 challans already issued today for {plate}")
+        return
+
+    previous_challans = list(challans_collection.find({"user": user_id}))
+    previous_fine = sum(ch["fine_amount"] for ch in previous_challans if not ch.get("is_paid", False))
+
+    challan_doc = {
+        "user": user_id,
+        "vehicle_no": user["vehicle_no"],
+        "fine_amount": 500,
+        "previous_fine_amount": previous_fine,
+        "total_fine_due": previous_fine + 500,
+        "violation_type": "No Helmet",
+        "violation_datetime": datetime.datetime.now(),
+        "location": {
+            "latitude": 12.9716,
+            "longitude": 77.5946,
+            "address": "Detected via CCTV at MG Road, Bengaluru"
+        },
+        "image_proof_url": "/images/sample-violation.jpg",
+        "officer_in_charge": "Automated System",
+        "challan_status": "Pending"
+    }
+
+    inserted = challans_collection.insert_one(challan_doc)
+    created_challan = challans_collection.find_one({"_id": inserted.inserted_id})
+    created_challan["user_detail"] = {
+        "name": user.get("name", "N/A"),
+        "vehicle_no": user.get("vehicle_no")
+    }
+
+    st.info(f"✅ Challan created for {plate}")
+    st.json(created_challan)
+
+# ✅ UI input option
+option = st.radio("Choose input type:", ("Image", "Video"))
+
 if option == "Image":
     uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
     if uploaded_file:
         image = Image.open(uploaded_file)
         frame = np.array(image)
         result_img, numbers = detect_and_display(frame)
-        st.image(result_img, caption="Detection Result", use_container_width=True)
+        st.image(result_img, caption="Detection Result", use_container_width=False, width=700)
+
         if numbers:
-            st.success(f"Detected Plate Number: {', '.join(numbers)}")
+            for plate in numbers:
+                create_challan(plate)
         else:
             st.error("❌ No plate number detected.")
 
-# Handle video input
 else:
     uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
     if uploaded_file:
@@ -140,6 +203,7 @@ else:
 
         stframe = st.empty()
         plate_log = []
+        prev_plate = ""
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -147,12 +211,21 @@ else:
                 break
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             frame, numbers = detect_and_display(frame, timestamp)
-            stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB")
-            plate_log.extend([(timestamp, num) for num in numbers])
+
+            for num in numbers:
+                if len(num) >= 5 and difflib.SequenceMatcher(None, num, prev_plate).ratio() < 0.85:
+                    plate_log.append((timestamp, num))
+                    prev_plate = num
+
+            stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", width=700)
 
         cap.release()
 
         if plate_log:
+            for t, num in plate_log[:1]:  # Just take first for challan creation
+                st.write(f"First Detected Plate: {num}")
+                create_challan(num)
+
             st.markdown("### Detected Plate Numbers")
             for t, num in plate_log:
                 st.write(f"{t} — {num}")
