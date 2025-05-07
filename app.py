@@ -14,6 +14,9 @@ from pymongo import MongoClient
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 from twilio.rest import Client
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # ✅ Load environment variables
 load_dotenv()
@@ -25,6 +28,7 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="auto"
 )
+
 
 
 st.title("🚨 Helmet Violation & Number Plate Detection System using OCR")
@@ -55,6 +59,12 @@ TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 TWILIO_FROM = os.getenv("TWILIO_FROM_PHONE")
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
+
+# ✅ Email config
+EMAIL_HOST = os.getenv("EMAIL_HOST")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT"))
+EMAIL_USER = os.getenv("EMAIL_HOST_USER")
+EMAIL_PASS = os.getenv("EMAIL_HOST_PASSWORD")
 
 # ✅ Accuracy display
 def get_accuracy_info():
@@ -120,6 +130,35 @@ def detect_and_display(frame, timestamp=None):
                         f.write(f"{timestamp or datetime.datetime.now()}\t{combined_plate}\n")
 
     return frame, detected_numbers
+
+def send_email(to_email, plate, fine_amount, previous_fine, total_due):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = to_email
+        msg['Subject'] = f"🚨 Traffic Violation - {plate}"
+
+        body = f"""
+        <h2>Traffic Violation Notice</h2>
+        <p><strong>Vehicle Number:</strong> {plate}</p>
+        <p><strong>Violation:</strong> No Helmet</p>
+        <p><strong>Fine:</strong> ₹{fine_amount}</p>
+        <p><strong>Previous Dues:</strong> ₹{previous_fine}</p>
+        <p><strong>Total Due:</strong> ₹{total_due}</p>
+        <p><strong>Location:</strong> MG Road, Bengaluru</p>
+        <p><strong>Date & Time:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        """
+
+        msg.attach(MIMEText(body, 'html'))
+
+        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.send_message(msg)
+            print(f"Email sent to {to_email}")
+
+    except Exception as e:
+        print(f"Email error: {e}")
 
 # ✅ Send SMS with fine info
 def send_sms(to_phone, plate, fine_amount, previous_fine, total_due):
@@ -192,6 +231,10 @@ def create_challan(plate):
     #     challan_doc["previous_fine_amount"],
     #     challan_doc["total_fine_due"]
     # )
+
+    send_email(user["email"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"])
+
+
 
     st.success(f"✅ Challan created for {plate}")
     st.markdown(f"""
