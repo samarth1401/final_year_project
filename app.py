@@ -17,6 +17,11 @@ from twilio.rest import Client
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import logging
+logging.getLogger('streamlit.runtime.scriptrunner').setLevel(logging.ERROR)
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
 
 # ✅ Load environment variables
 load_dotenv()
@@ -124,6 +129,7 @@ def detect_and_display(frame, timestamp=None):
 
                 if len(combined_plate) >= 3:
                     detected_numbers.append(combined_plate)
+                    print(f"[INFO] Detected Number Plate: {combined_plate}")
                     cv2.putText(frame, f"Plate: {combined_plate}", (x1, y2 + 35),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
                     with open(save_file, "a") as f:
@@ -224,13 +230,13 @@ def create_challan(plate):
         "phone_no": user.get("phone_no", "N/A")
     }
 
-    # send_sms(
-    #     user["phone_no"],
-    #     plate,
-    #     challan_doc["fine_amount"],
-    #     challan_doc["previous_fine_amount"],
-    #     challan_doc["total_fine_due"]
-    # )
+    send_sms(
+        user["phone_no"],
+        plate,
+        challan_doc["fine_amount"],
+        challan_doc["previous_fine_amount"],
+        challan_doc["total_fine_due"]
+    )
 
     send_email(user["email"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"])
 
@@ -261,7 +267,7 @@ if option == "Image":
         image = Image.open(uploaded_file)
         frame = np.array(image)
         result_img, numbers = detect_and_display(frame)
-        st.image(result_img, caption="Detection Result", use_container_width=False, width=700)
+        st.image(result_img, caption="Detection Result", use_container_width=False, width=500)
 
         if numbers:
             for plate in numbers:
