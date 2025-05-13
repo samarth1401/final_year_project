@@ -18,6 +18,11 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import logging
 import warnings
+from fpdf import FPDF
+from email.mime.application import MIMEApplication
+
+
+
 
 # Suppress warnings and logs
 logging.getLogger('streamlit.runtime.scriptrunner').setLevel(logging.ERROR)
@@ -93,7 +98,7 @@ def detect_and_display(frame, timestamp=None):
             conf = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            margin = 15
+            margin = 20
             h, w, _ = frame.shape
             x1 = max(0, x1 - margin)
             y1 = max(0, y1 - margin)
@@ -126,24 +131,91 @@ def detect_and_display(frame, timestamp=None):
 
     return frame, detected_numbers
 
+def generate_challan_pdf(challan_doc, user):
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Title with font and police color
+    pdf.set_font("Arial", 'B', 16)
+    pdf.set_text_color(0, 0, 128)
+    pdf.cell(200, 10, txt="Davangere Traffic Police", ln=True, align='C')
+
+    pdf.set_font("Arial", 'B', 14)
+    pdf.set_text_color(220, 50, 50)
+    pdf.cell(200, 10, txt="Traffic Violation Challan", ln=True, align='C')
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(10)
+
+    # Basic Information
+    pdf.set_font("Arial", '', 12)
+    data = [
+        ("Challan No.", str(challan_doc['_id'])),
+        ("Violation Date & Time", challan_doc['violation_datetime'].strftime('%d-%b-%Y %H:%M')),
+        ("Vehicle Number", challan_doc['vehicle_no']),
+        ("License Number", "N/A"),
+        ("Violation", challan_doc['violation_type']),
+        ("Fine Amount (Rs.)", str(challan_doc['fine_amount'])),
+        ("Previous Dues (Rs.)", str(challan_doc['previous_fine_amount'])),
+        ("Total Fine Due (Rs.)", str(challan_doc['total_fine_due'])),
+        ("Location", challan_doc['location']['address']),
+        ("Officer In Charge", challan_doc['officer_in_charge']),
+        ("Status", challan_doc['challan_status']),
+    ]
+    for key, value in data:
+        pdf.cell(60, 10, txt=f"{key}:", border=0)
+        pdf.cell(100, 10, txt=value, border=0, ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 10, txt="Violation Evidence Image:", ln=True)
+
+    # Add Image
+    if 'image_path' in challan_doc and os.path.exists(challan_doc['image_path']):
+        pdf.image(challan_doc['image_path'], x=60, w=90)
+    else:
+        pdf.set_font("Arial", '', 10)
+        pdf.cell(200, 10, txt="(No image found)", ln=True)
+
+    pdf.ln(10)
+    pdf.set_font("Arial", 'I', 9)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(200, 10, txt="Note: This is a system-generated challan. No signature required.", ln=True, align='C')
+
+    # Reset color for future documents
+    pdf.set_text_color(0, 0, 0)
+
+    filepath = os.path.join("detected_numbers", f"challan_{challan_doc['_id']}.pdf")
+    pdf.output(filepath)
+    return filepath
+
+
 # ✅ Email sender
-def send_email(to_email, plate, fine_amount, previous_fine, total_due):
+
+def send_email(to_email, plate, fine_amount, previous_fine, total_due, challan_doc, user):
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_USER
         msg['To'] = to_email
         msg['Subject'] = f"🚨 Traffic Violation - {plate}"
+
         body = f"""
         <h2>Traffic Violation Notice</h2>
         <p><strong>Vehicle Number:</strong> {plate}</p>
         <p><strong>Violation:</strong> No Helmet</p>
-        <p><strong>Fine:</strong> ₹{fine_amount}</p>
-        <p><strong>Previous Dues:</strong> ₹{previous_fine}</p>
-        <p><strong>Total Due:</strong> ₹{total_due}</p>
+        <p><strong>Fine:</strong> Rs.{fine_amount}</p>
+        <p><strong>Previous Dues:</strong> Rs.{previous_fine}</p>
+        <p><strong>Total Due:</strong> Rs.{total_due}</p>
         <p><strong>Location:</strong> MG Road, Bengaluru</p>
         <p><strong>Date & Time:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         """
         msg.attach(MIMEText(body, 'html'))
+
+        # attach pdf
+        pdf_path = generate_challan_pdf(challan_doc, user)
+        with open(pdf_path, "rb") as f:
+            part = MIMEApplication(f.read(), _subtype="pdf")
+            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(pdf_path))
+            msg.attach(part)
 
         with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
             server.starttls()
@@ -153,14 +225,19 @@ def send_email(to_email, plate, fine_amount, previous_fine, total_due):
     except Exception as e:
         print(f"Email error: {e}")
 
+
+
 # ✅ SMS sender
 def send_sms(to_phone, plate, fine_amount, previous_fine, total_due):
     try:
+        if not to_phone.startswith('+91'):
+            to_phone = '+91' + to_phone
+
         message = twilio_client.messages.create(
             body=(
                 f"Traffic Violation (No Helmet)\n"
                 f"Plate: {plate}\n"
-                f"Fine: ₹{fine_amount}, Prev: ₹{previous_fine}, Total: ₹{total_due}"
+                f"Fine: Rs.{fine_amount}, Prev: Rs.{previous_fine}, Total: Rs.{total_due}"
             ),
             from_=TWILIO_FROM,
             to=to_phone
@@ -170,7 +247,7 @@ def send_sms(to_phone, plate, fine_amount, previous_fine, total_due):
         print(f"SMS error: {e}")
 
 # ✅ Challan generator
-def create_challan(plate):
+def create_challan(plate, violation_frame=None):
     user = users_collection.find_one({"vehicle_no": plate})
     if not user:
         st.warning(f"⚠️ No user found for vehicle number: {plate}")
@@ -191,6 +268,9 @@ def create_challan(plate):
 
     previous_challans = list(challans_collection.find({"user": user_id}))
     previous_fine = sum(ch["fine_amount"] for ch in previous_challans if not ch.get("is_paid", False))
+    image_path = f"detected_numbers/violation_{plate}_{now.strftime('%Y%m%d%H%M%S')}.jpg"
+    if violation_frame is not None:
+        cv2.imwrite(image_path, violation_frame)
 
     challan_doc = {
         "user": user_id,
@@ -200,6 +280,7 @@ def create_challan(plate):
         "total_fine_due": previous_fine + 500,
         "violation_type": "No Helmet",
         "violation_datetime": now,
+        "image_path": image_path,
         "location": {
             "latitude": 12.9716,
             "longitude": 77.5946,
@@ -213,8 +294,8 @@ def create_challan(plate):
     inserted = challans_collection.insert_one(challan_doc)
     created_challan = challans_collection.find_one({"_id": inserted.inserted_id})
 
-    send_sms(user["phone_no"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"])
-    send_email(user["email"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"])
+    # send_sms(user["phone_no"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"])
+    send_email(user["email"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"], challan_doc, user)
 
     st.success(f"✅ Challan created for {plate}")
     st.markdown(f"""
@@ -222,14 +303,31 @@ def create_challan(plate):
     - **Name:** {user.get("name", "N/A")}
     - **Phone Number:** {user.get("phone_no", "N/A")}
     - **Vehicle Number:** {created_challan['vehicle_no']}
-    - **Fine Amount:** ₹{created_challan['fine_amount']}
-    - **Previous Dues:** ₹{created_challan['previous_fine_amount']}
-    - **Total Fine Due:** ₹{created_challan['total_fine_due']}
+    - **Fine Amount:** Rs.{created_challan['fine_amount']}
+    - **Previous Dues:** Rs.{created_challan['previous_fine_amount']}
+    - **Total Fine Due:** Rs.{created_challan['total_fine_due']}
     - **Violation:** {created_challan['violation_type']}
     - **Date & Time:** {created_challan['violation_datetime'].strftime('%Y-%m-%d %H:%M:%S')}
     - **Location:** {created_challan['location']['address']}
     - **Status:** {created_challan['challan_status']}
     """)
+
+    pdf_path = generate_challan_pdf(created_challan, user)
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            label="📄 Download Challan PDF",
+            data=f.read(),
+            file_name=os.path.basename(pdf_path),
+            mime="application/pdf"
+        )
+
+    try:
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+        if 'image_path' in created_challan and os.path.exists(created_challan['image_path']):
+            os.remove(created_challan['image_path'])
+    except Exception as e:
+         st.warning(f"⚠️ Could not delete temporary files: {e}")
 
 # ✅ Streamlit UI
 option = st.radio("Choose input type:", ("Image", "Video", "Live Webcam"))
@@ -240,9 +338,9 @@ if option == "Image":
         image = Image.open(uploaded_file)
         frame = np.array(image)
         result_img, numbers = detect_and_display(frame)
-        st.image(result_img, caption="Detection Result", use_container_width=False, width=700)
+        st.image(result_img, caption="Detection Result", use_container_width=False, width=300)
         for plate in numbers:
-            create_challan(plate)
+            create_challan(plate,frame)
 
 elif option == "Video":
     uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
@@ -263,15 +361,15 @@ elif option == "Video":
                 if len(num) >= 5 and difflib.SequenceMatcher(None, num, prev_plate).ratio() < 0.85:
                     plate_log.append((timestamp, num))
                     prev_plate = num
-            stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", width=700)
+            stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", width=200)
         cap.release()
         for t, num in plate_log[:1]:
             st.write(f"First Detected Plate: {num}")
-            create_challan(num)
+            create_challan(num,frame)
 
 elif option == "Live Webcam":
     st.info("🔴 Using Mobile IP Webcam")
-    mobile_ip = "http://192.168.29.141:8080/video"
+    mobile_ip = os.getenv("MOBILE_IP", "http://192.168.1.11:8080/video")
     cap = cv2.VideoCapture(mobile_ip)
 
     if not cap.isOpened():
@@ -293,7 +391,7 @@ elif option == "Live Webcam":
                 for num in numbers:
                     if len(num) >= 5 and difflib.SequenceMatcher(None, num, prev_plate).ratio() < 0.85:
                         st.write(f"[LIVE] {timestamp} - Plate: {num}")
-                        create_challan(num)
+                        create_challan(num,frame)
                         prev_plate = num
                 stframe.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), channels="RGB", width=700)
             else:
