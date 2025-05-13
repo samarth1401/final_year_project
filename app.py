@@ -56,6 +56,7 @@ db = client["database"]
 users_collection = db["user_details"]
 challans_collection = db["challans"]
 
+
 # ✅ Twilio config
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")

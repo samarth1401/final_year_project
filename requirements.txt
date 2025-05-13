@@ -8,3 +8,4 @@ Pillow
 pymongo
 python-dotenv
 twilio
+fpdf
